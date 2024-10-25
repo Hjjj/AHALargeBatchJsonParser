@@ -15,42 +15,88 @@ namespace AhaLargeBatchParser
     class Program
     {
         const string JSON_FILES_TO_PROCESS_TABLE = "WorkQueue";
+        protected static string dbPath = ConfigurationManager.AppSettings["DbPath"];
+        protected static string JSONDirectoryPath = ConfigurationManager.AppSettings["DirectoryPath"];
+        protected static string csvFolder = ConfigurationManager.AppSettings["CsvFolder"];
+        protected static string logFolder = ConfigurationManager.AppSettings["LogFolder"];
 
         static void Main(string[] args)
         {
-            string directoryPath = ConfigurationManager.AppSettings["DirectoryPath"];
-            string dbPath = ConfigurationManager.AppSettings["DbPath"];
-            string csvFolder = ConfigurationManager.AppSettings["CsvFolder"];
-            string logFolder = ConfigurationManager.AppSettings["LogFolder"];
+            ConsoleAndLog("Application Started.");
 
-            string rootFolder = AppDomain.CurrentDomain.BaseDirectory;
-            InitializePaths(dbPath, csvFolder, logFolder);
+            InitializePaths();
+            ConsoleAndLog("Paths initialized.");
 
             // Configure Serilog
             Log.Logger = new LoggerConfiguration()
                 .WriteTo.File(Path.Combine(logFolder, "log.txt"))
                 .CreateLogger();
 
-            Log.Information("Application started.");
+            InitializeWorkQueue();
+            ConsoleAndLog("Work Queue Ready to Use.");
 
-            var filePaths = GetAllFilePaths(dbPath);
-            Log.Information($"There are {filePaths.Count} file paths in the Work Queue.");
+            ProcessWorkQueue();
+            ConsoleAndLog("Work queue completed.");
 
-            int rowCount = GetRowCount(dbPath);
-            Log.Information($"There are {rowCount} rows in the database.");
-
-            Log.Information("Application finished.");
+            ConsoleAndLog("Application finished.");
             Console.ReadKey();
         }
 
-        static void InitializePaths(string dbPath, string csvFolder, string logFolder)
+        private static void ProcessWorkQueue()
         {
-            string rootFolder = AppDomain.CurrentDomain.BaseDirectory;
+            //loop through the work queue
+            using (var connection = new SQLiteConnection($"Data Source={dbPath};Version=3;"))
+            {
+                connection.Open();
+
+                string selectQuery = $"SELECT Path FROM {JSON_FILES_TO_PROCESS_TABLE} WHERE IsComplete=0";
+                using (var command = new SQLiteCommand(selectQuery, connection))
+                {
+                    using (var reader = command.ExecuteReader())
+                    {
+                        int ct = 0;
+                        while (reader.Read())
+                        {
+                            Console.WriteLine($"{++ct} {reader["Path"].ToString()}");
+                        }
+                    }
+                }
+
+                connection.Close();
+            }
+
+        }
+
+        private static void ConsoleAndLog(string message)
+        {
+            Console.WriteLine(message);
+            Log.Information(message);
+        }
+
+        private static void InitializeWorkQueue()
+        {
+            int rowCount = GetRowCount();
+
+            if (rowCount == 0)
+            {
+                Console.WriteLine($"y|n, Import JSON Tasks to Work Queue?");
+                ConsoleKeyInfo response = Console.ReadKey();
+                
+                if (response.KeyChar == 'y')
+                {
+                    LoadJsonFilesIntoWorkQueue();
+                }
+            }
+        }
+
+        static void InitializePaths()
+        {
+            string rootFolder1 = AppDomain.CurrentDomain.BaseDirectory;
 
             //is the db already there
             if (!File.Exists(dbPath))
             {
-                Console.WriteLine($"y|n, Create new database at {Path.Combine(rootFolder, dbPath)}");
+                Console.WriteLine($"y|n, Create new database at {Path.Combine(rootFolder1, dbPath)}");
                 ConsoleKeyInfo response = Console.ReadKey();
                 if (response.KeyChar == 'y')
                 {
@@ -67,39 +113,42 @@ namespace AhaLargeBatchParser
 
                         connection.Close();
                     }
-                    Console.WriteLine($"DB Created.");
+                    Console.WriteLine($" DB Created.");
                 }
                 else
                 {
                     Console.WriteLine("Exiting program.");
+                    Log.Information("Exiting program because no DB.");
                     Environment.Exit(0);
                 }
             }
 
             if (csvFolder == string.Empty)
             {
-                csvFolder = rootFolder;
+                csvFolder = rootFolder1;
             }
             else if (!Directory.Exists(csvFolder))
             {
                 Console.WriteLine($"CSV folder does not exist. Any key to exit.");
+                Log.Error("CSV folder does not exist. Any key to exit.");
                 Console.ReadKey();
                 Environment.Exit(0);
             }
 
             if (logFolder == string.Empty)
             {
-                logFolder = rootFolder;
+                logFolder = rootFolder1;
             }
             else if (!Directory.Exists(logFolder))
             {
                 Console.WriteLine($"Log folder does not exist. Any key to exit.");
+                Log.Error("Log folder does not exist. Any key to exit.");
                 Console.ReadKey();
                 Environment.Exit(0);
             }
         }
 
-        static int GetRowCount(string dbPath)
+        static int GetRowCount()
         {
             int rowCount = 0;
 
@@ -117,6 +166,28 @@ namespace AhaLargeBatchParser
             }
 
             return rowCount;
+        }
+
+        static void LoadJsonFilesIntoWorkQueue()
+        {
+            using (var connection = new SQLiteConnection($"Data Source={dbPath};Version=3;"))
+            {
+                connection.Open();
+
+                foreach (string jsonFilePath in Directory.EnumerateFiles(JSONDirectoryPath, "*.json"))
+                {
+                    string insertQuery = $"INSERT OR IGNORE INTO {JSON_FILES_TO_PROCESS_TABLE} (Path, IsComplete, Comments) VALUES (@Path, @IsComplete, @Comments)";
+                    using (var command = new SQLiteCommand(insertQuery, connection))
+                    {
+                        command.Parameters.AddWithValue("@Path", jsonFilePath);
+                        command.Parameters.AddWithValue("@IsComplete", 0);
+                        command.Parameters.AddWithValue("@Comments", string.Empty);
+                        command.ExecuteNonQuery();
+                    }
+                }
+
+                connection.Close();
+            }
         }
 
         static List<string> GetAllFilePaths(string dbPath)
