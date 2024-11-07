@@ -15,7 +15,8 @@ using Serilog;
 namespace AhaLargeBatchParser
 {
     /// <summary>
-    /// This program creates a 'to do list' of JSON files to process.
+    /// This program processes a directory full of AHA Ecard JSONs into a single csv file.
+    /// It creates a 'to do list' of JSON files to process.
     /// It loops through the list turning each item into a row in a csv file.
     /// It stops at NumberOfRowsPerBatch and creates a csv file of that batch.
     /// </summary>
@@ -30,23 +31,16 @@ namespace AhaLargeBatchParser
 
         static void Main(string[] args)
         {
-            ConsoleAndLog("Application Started.");
-
-            InitializePaths();
-            ConsoleAndLog("Paths initialized.");
-
             // Configure Serilog
             Log.Logger = new LoggerConfiguration()
-                .WriteTo.File(Path.Combine(logFolder, "log.txt"))
+                .WriteTo.File(Path.Combine(logFolder, "log_csv.txt"))
                 .CreateLogger();
 
+            ConsoleAndLog("Application Started.");
+            InitializePaths();
             InitializeWorkQueue();
-            ConsoleAndLog("Work Queue Ready to Use.");
-
             ProcessWorkQueue();
-            ConsoleAndLog("Work queue completed.");
-
-            ConsoleAndLog("Application finished.");
+            ConsoleAndLog("Work queue completed. Application finished");
             Console.ReadKey();
         }
 
@@ -69,7 +63,7 @@ namespace AhaLargeBatchParser
                 {
                     using (var reader = command.ExecuteReader())
                     {
-                        ConsoleAndLog($"Converting Begin");
+                        ConsoleAndLog($"BEGIN JSON to CSV conversion loop");
                         var fileNum = 0;
 
                         List<eCardCsvSheet> eCardCSVList = new List<eCardCsvSheet>();
@@ -77,7 +71,7 @@ namespace AhaLargeBatchParser
                         while (reader.Read())
                         {
                             string fileName = reader["Path"].ToString();
-                            ConsoleAndLog($"{++fileNum} Convert {fileName}");
+                            ConsoleAndLog($"{++fileNum} {fileName}");
                             eCardCsvSheet csvSheet = ConvertJSONToCSV(fileName);
                             
                             if(csvSheet != null)
@@ -85,19 +79,22 @@ namespace AhaLargeBatchParser
                                 eCardCSVList.Add(csvSheet);
                             }
 
+                            //save a batch of rowt to a csv file
                             if (eCardCSVList.Count >= CsvBatchSize)
                             {
+                                ConsoleAndLog($"Attempting to save a Batch of {CsvBatchSize} to CSV file.");
                                 WriteToCSVFile(eCardCSVList);
                                 UpdateDbStatus(eCardCSVList, connection);
                                 eCardCSVList.Clear();
                                 fileNum = 0;
+                                ConsoleAndLog($"Batch of {CsvBatchSize} saved to a CSV file.");
                             }
                         } //while reader.read
 
                         //reader is done finish off the remaining rows
                         WriteToCSVFile(eCardCSVList);
                         UpdateDbStatus(eCardCSVList, connection);
-                        ConsoleAndLog($"Converting Complete");
+                        ConsoleAndLog($"END JSON to CSV conversion loop");
                     }
                 }
 
@@ -110,6 +107,7 @@ namespace AhaLargeBatchParser
         {
             if (eCardCSVList == null || eCardCSVList.Count == 0)
             {
+                ConsoleAndLog($"Error writing to CSV file. eCardCSVList was empty.");
                 return;
             }
 
@@ -130,6 +128,7 @@ namespace AhaLargeBatchParser
                         csv.WriteRecords(eCardCSVList);
                     }
                 }
+                ConsoleAndLog($"CSV file written as {csvFileName}");
             }
             catch (Exception ex)
             {
@@ -155,7 +154,7 @@ namespace AhaLargeBatchParser
 
         private static string GetCsvFileName()
         {
-            string timestamp = DateTime.Now.ToString("yyyy-MM-dd-HH-mm-ss");
+            string timestamp = DateTime.Now.ToString("CSV-yyyy-MM-dd-HH-mm-ss");
             string csvFileName = $"{timestamp}.txt";
             return csvFileName;
         }
@@ -484,26 +483,31 @@ namespace AhaLargeBatchParser
         private static void InitializeWorkQueue()
         {
             int rowCount = GetRowCount();
+            ConsoleAndLog($"WorkQueue has {rowCount} items to process.");
 
-            if (rowCount == 0)
-            {
-                Console.WriteLine($"y|n, Import JSON Tasks to Work Queue?");
-                ConsoleKeyInfo response = Console.ReadKey();
+            if (rowCount > 0)
+                Console.WriteLine($"Some of those could be bad leftover files from previous runs. ");
+
+            Console.WriteLine($"Scan for more files to process in {JSONDirectoryPath}?");
+            Console.WriteLine($"Y|N ?");
+            ConsoleKeyInfo response = Console.ReadKey();
                 
-                if (response.KeyChar == 'y')
-                {
-                    LoadJsonFilesIntoWorkQueue();
-                }
+            if (response.KeyChar == 'y')
+            {
+                LoadJsonFilesIntoWorkQueue();
+                Console.WriteLine($"WorkQueue now has {GetRowCount()} items to process.");
             }
         }
 
         static void InitializePaths()
         {
             string rootFolder1 = AppDomain.CurrentDomain.BaseDirectory;
+            ConsoleAndLog($"Root Folder: {rootFolder1}");
 
             //is the db already there
             if (!File.Exists(dbPath))
             {
+
                 Console.WriteLine($"y|n, Create new database at {Path.Combine(rootFolder1, dbPath)}");
                 ConsoleKeyInfo response = Console.ReadKey();
                 if (response.KeyChar == 'y')
@@ -513,7 +517,7 @@ namespace AhaLargeBatchParser
                         connection.Open();
 
                         // Create table if it doesn't exist
-                        string createTableQuery = $"CREATE TABLE IF NOT EXISTS {JSON_FILES_TO_PROCESS_TABLE} (Id INTEGER PRIMARY KEY, Path TEXT, IsComplete INTEGER, Comments TEXT)";
+                        string createTableQuery = $"CREATE TABLE IF NOT EXISTS {JSON_FILES_TO_PROCESS_TABLE} (Id INTEGER PRIMARY KEY, Path TEXT UNIQUE, IsComplete INTEGER, Comments TEXT)";
                         using (var command = new SQLiteCommand(createTableQuery, connection))
                         {
                             command.ExecuteNonQuery();
@@ -521,12 +525,11 @@ namespace AhaLargeBatchParser
 
                         connection.Close();
                     }
-                    Console.WriteLine($" DB Created.");
+                    ConsoleAndLog($" DB Created at {Path.Combine(rootFolder1, dbPath)}");
                 }
                 else
                 {
-                    Console.WriteLine("Exiting program.");
-                    Log.Information("Exiting program because no DB.");
+                    ConsoleAndLog("Exiting program. There was no DB and user declined to create new one.");
                     Environment.Exit(0);
                 }
             }
@@ -564,7 +567,7 @@ namespace AhaLargeBatchParser
             {
                 connection.Open();
 
-                string countQuery = $"SELECT COUNT(*) FROM {JSON_FILES_TO_PROCESS_TABLE}";
+                string countQuery = $"SELECT COUNT(*) FROM {JSON_FILES_TO_PROCESS_TABLE} WHERE IsComplete=0";
                 using (var command = new SQLiteCommand(countQuery, connection))
                 {
                     rowCount = Convert.ToInt32(command.ExecuteScalar());
@@ -576,12 +579,28 @@ namespace AhaLargeBatchParser
             return rowCount;
         }
 
+        static int JSONCount(string folderPath)
+        {
+            if (string.IsNullOrEmpty(folderPath) || !Directory.Exists(folderPath))
+            {
+                ConsoleAndLog("Error: Folder path is invalid or does not exist.");
+                return 0;
+            }
+
+            string[] jsonFiles = Directory.GetFiles(folderPath, "*.json", SearchOption.TopDirectoryOnly);
+            return jsonFiles.Length;
+        }
+
         static void LoadJsonFilesIntoWorkQueue()
         {
+            ConsoleAndLog($"Loading JSON files into Work Queue. (if any)");
+            ConsoleAndLog($"Scanning through {JSONDirectoryPath} files...");
+
             using (var connection = new SQLiteConnection($"Data Source={dbPath};Version=3;"))
             {
                 connection.Open();
 
+                int fileCount = 0;
                 foreach (string jsonFilePath in Directory.EnumerateFiles(JSONDirectoryPath, "*.json"))
                 {
                     string insertQuery = $"INSERT OR IGNORE INTO {JSON_FILES_TO_PROCESS_TABLE} (Path, IsComplete, Comments) VALUES (@Path, @IsComplete, @Comments)";
@@ -592,10 +611,17 @@ namespace AhaLargeBatchParser
                         command.Parameters.AddWithValue("@Comments", string.Empty);
                         command.ExecuteNonQuery();
                     }
+
+                    if (++fileCount % 1000 == 0)
+                    {
+                        Console.WriteLine($"Scanned {fileCount} files...");
+                    }
                 }
 
                 connection.Close();
             }
+
+            ConsoleAndLog($"Scanning complete.");
         }
 
         static List<string> GetAllFilePaths(string dbPath)
@@ -747,6 +773,18 @@ namespace AhaLargeBatchParser
         static bool IsFullFolderPath(string fileName)
         {
             return Path.GetDirectoryName(fileName) != string.Empty;
+        }
+        static int CountJsonFilesInDirectory(string directoryPath)
+        {
+            if (!Directory.Exists(directoryPath))
+            {
+                ConsoleAndLog($"Directory does not exist: {directoryPath}");
+                return 0;
+            }
+
+            int jsonFileCount = Directory.EnumerateFiles(directoryPath, "*.json").Count();
+            ConsoleAndLog($"Found {jsonFileCount} JSON files in directory: {directoryPath}");
+            return jsonFileCount;
         }
     }
 
